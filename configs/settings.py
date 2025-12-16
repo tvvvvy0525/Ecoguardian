@@ -32,7 +32,7 @@ FIRE_SPREAD_PROB = 0.005         # 火势向四周蔓延的概率
 TREE_DENSITY = 0.7              # 初始森林覆盖率
 
 # --- 物理引擎参数 ---
-TREE_MAX_FUEL = 50              # 树木燃料值 (持续燃烧帧数)
+TREE_MAX_FUEL = 100              # 树木燃料值 (持续燃烧帧数)
 # WIND_DIRECTION = (1, 0)         # 风向 (x, y), 例如 (1,0) 为向右吹
 WIND_STRENGTH = 1.5             # 风力影响因子 (建议 0.0 ~ 2.0)
 
@@ -41,3 +41,10 @@ ROBOT_MAX_WATER = 20            # 最大水量 (灭火消耗)
 ROBOT_LOW_BATTERY_THRESHOLD = 50 # 低电量阈值 (触发返航)
 ROBOT_LOW_WATER_THRESHOLD = 5    # 低水量阈值 (触发返航)
 ROBOT_IDLE_RETURN_THRESHOLD = 100 # 空闲自动回补给站阈值 (帧数)
+
+DRYNESS_INCREASE_RATE = 0.3     # 每帧增加的干燥度
+IGNITION_DRYNESS_THRESHOLD = 100 # 超过此干燥度可能自燃 (约30秒~60秒不降雨/不处理)
+SPONTANEOUS_FIRE_PROB = 0.00003   # 超过阈值后的每帧自燃概率
+
+STATUS_BAR_WIDTH = 18           # 状态条宽度 (略小于格子的20px)
+STATUS_BAR_HEIGHT = 3           # 状态条高度

@@ -22,7 +22,7 @@ class GridMap:
 
         # 记录每个格子最后一次被无人机覆盖的帧数 (初始化为0)
         self.last_scan_frame = np.zeros((width, height), dtype=int)
-
+        self.dryness_grid = np.zeros((width, height), dtype=float)
         self.wind_name, self.wind_direction = random.choice(self.WIND_DATA)
         print(f"Simulation Init: Wind is blowing {self.wind_name} {self.wind_direction}")
         
@@ -37,6 +37,7 @@ class GridMap:
                 if rand < density:
                     self.grid[x][y] = 1  # Tree
                     self.fuel_grid[x][y] = TREE_MAX_FUEL # 初始化燃料
+                    self.dryness_grid[x][y] = random.uniform(0, IGNITION_DRYNESS_THRESHOLD * 0.5)
                 elif rand < density + 0.05:
                     self.grid[x][y] = 3  # Wall (少量障碍物)
                 else:
@@ -58,13 +59,32 @@ class GridMap:
         if len(trees) > 0:
             idx = random.randint(0, len(trees) - 1)
             x, y = trees[idx]
-            self.grid[x][y] = 2  # Set to Fire
+            self.grid[x][y] = 2  # 点燃树木
+            self.dryness_grid[x][y] = 0 # 初始干燥度
             print(f"Fire started at ({x}, {y})")
             return (x, y)
         return None
     
+    def update_dryness(self):
+        """更新干燥度并触发自燃"""
+        # 遍历所有格子 (可以用 NumPy 优化，这里为了逻辑清晰用循环)
+        # 只有树木(1)会变干
+        tree_indices = np.argwhere(self.grid == 1)
+        for x, y in tree_indices:
+            noise = random.uniform(0.5, 1.5)
+            self.dryness_grid[x][y] += DRYNESS_INCREASE_RATE * noise
+            
+            if self.dryness_grid[x][y] > IGNITION_DRYNESS_THRESHOLD:
+                if random.random() < SPONTANEOUS_FIRE_PROB:
+                    self.grid[x][y] = 2 
+                    # [变更3] 重置扰动：自燃后重置为微小随机值，而非硬0
+                    self.dryness_grid[x][y] = random.uniform(0, 5)
+                    print(f"Spontaneous ignition at ({x}, {y})!")
+
     def update_fire_spread(self):
         """核心逻辑：模拟火势蔓延 (带风向与燃料)"""
+        # 1. 先执行干燥度更新 (可能产生新火源)
+        self.update_dryness()
         # 复制当前网格，确保同步更新
         new_grid = self.grid.copy()
         
@@ -74,6 +94,7 @@ class GridMap:
         for fx, fy in fire_indices:
             # 1. 燃料消耗与自动熄灭逻辑
             self.fuel_grid[fx][fy] -= 1
+            self.dryness_grid[fx][fy] = 0 
             if self.fuel_grid[fx][fy] <= 0:
                 new_grid[fx][fy] = 4 # 燃料耗尽，转为焦土
                 continue # 已熄灭，不再向周围传播
@@ -103,6 +124,7 @@ class GridMap:
 
                             if random.random() < current_prob:
                                 new_grid[nx][ny] = 2 # 点燃
+                                self.dryness_grid[nx][ny] = random.uniform(0, 5)
 
         self.grid = new_grid
 
@@ -116,6 +138,9 @@ class GridMap:
         """设置状态"""
         if 0 <= x < self.width and 0 <= y < self.height:
             self.grid[x][y] = state
+            # 如果被灭火(变成4)或变成其他状态，重置干燥度
+            if state == 4 or state == 2:
+                self.dryness_grid[x][y] = random.uniform(0, 5)
 
     def get_fire_locations(self):
         """返回所有火点的坐标列表"""

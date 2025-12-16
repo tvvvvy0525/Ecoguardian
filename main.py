@@ -109,18 +109,21 @@ def main():
              # A. 环境演化
             env_map.update_fire_spread()
             
-            # B. 无人机感知 (更新了调用参数)
-            current_frame_fires = set()
-            for drone in drones:
-                # 无人机每帧移动一次即可 (原代码是两次，现在改为一次以匹配 10FPS 节奏)
-                drone.step(env_map, frame_count) 
-                
-                # 扫描并更新热力图
-                found = drone.scan(env_map, frame_count)
-                for f in found:
-                    current_frame_fires.add(f)
+        # B. 无人机感知 (更新了调用参数)
+        current_frame_fires = set()
+        for drone in drones:
+            # 无人机每帧移动一次即可 (原代码是两次，现在改为一次以匹配 10FPS 节奏)
+            drone.step(env_map, frame_count) 
             
-            detected_fires.update(current_frame_fires)
+            # 扫描并更新热力图
+            found = drone.scan(env_map, frame_count)
+            for f in found:
+                current_frame_fires.add(f)
+        for robot in robots:
+            local_found = robot.scan_local(env_map)
+            for f in local_found:
+                current_frame_fires.add(f)
+        detected_fires.update(current_frame_fires)
         
         # 移除已经不再燃烧的火点 (可能已经被灭了)
         # 注意：这里需要做一个清洗，否则任务池会无限膨胀
