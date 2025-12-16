@@ -17,6 +17,8 @@ class Robot(BaseAgent):
         self.battery = ROBOT_MAX_BATTERY
         self.water = ROBOT_MAX_WATER
         self.idle_counter = 0
+        self.replan_cooldown = 0
+
     def find_nearest_depot(self, grid_map):
         """寻找最近的补给站坐标 (分散式策略)"""
         min_dist = float('inf')
@@ -38,6 +40,7 @@ class Robot(BaseAgent):
             # 随机选择一个距离最近的，打破扎堆
             return random.choice(candidates)
         return None
+
     def scan_local(self, grid_map):
         """局部感知：探测周围 5x5 区域内的火点"""
         local_fires = []
@@ -51,6 +54,7 @@ class Robot(BaseAgent):
                     if grid_map.get_state(nx, ny) == 2: # Fire
                         local_fires.append((nx, ny))
         return local_fires
+
     def set_target(self, tx, ty, grid_map):
         """设定目标并规划路径"""
         self.target = (tx, ty)
@@ -68,38 +72,35 @@ class Robot(BaseAgent):
             self.status = "IDLE"
             self.target = None
 
+    def find_immediate_fire(self, grid_map):
+        """寻找紧邻的（距离很近）的火点，用于连续作战"""
+        scan_range = 3 # 搜索半径
+        best_fire = None
+        min_dist = float('inf')
+
+        for dx in range(-scan_range, scan_range + 1):
+            for dy in range(-scan_range, scan_range + 1):
+                nx, ny = self.x + dx, self.y + dy
+                
+                # 越界检查
+                if 0 <= nx < grid_map.width and 0 <= ny < grid_map.height:
+                    # 如果发现火点 (2)
+                    if grid_map.get_state(nx, ny) == 2:
+                        # 简单的距离计算
+                        dist = abs(self.x - nx) + abs(self.y - ny)
+                        # 排除掉自己刚刚灭掉的那个位置
+                        if dist > 0 and dist < min_dist:
+                            min_dist = dist
+                            best_fire = (nx, ny)
+        
+        return best_fire
+
     def step(self, grid_map):
         """执行一步行动 (状态机核心)"""
-        # --- 0. 局部感知与任务抢占 (新增核心逻辑) ---
-        # 只要不是在回城(RETURNING)或已经没水了，就可以抢占任务
-        if self.status != "RETURNING" and self.water > 0:
-            local_fires = self.scan_local(grid_map)
-            
-            if local_fires:
-                # 找最近的一个本地火点
-                closest_fire = None
-                min_dist = float('inf')
-                for fx, fy in local_fires:
-                    d = abs(self.x - fx) + abs(self.y - fy)
-                    if d < min_dist:
-                        min_dist = d
-                        closest_fire = (fx, fy)
-                
-                # 决策：如果当前没有目标，或者当前目标太远(>5步)，而脚边就有火 -> 抢占！
-                should_preempt = False
-                if self.status == "IDLE":
-                    should_preempt = True
-                elif self.status == "MOVING" and self.target:
-                    # 计算到当前目标的距离
-                    current_target_dist = abs(self.x - self.target[0]) + abs(self.y - self.target[1])
-                    # 如果本地火点比当前目标近得多，且不是同一个点
-                    if min_dist < current_target_dist and closest_fire != self.target:
-                        should_preempt = True
-                
-                if should_preempt and closest_fire:
-                    print(f"Robot {self.id}: Preemptively targeting local fire at {closest_fire}")
-                    # 直接切换目标，不经过调度中心
-                    self.set_target(closest_fire[0], closest_fire[1], grid_map)
+        if self.replan_cooldown > 0:
+            self.replan_cooldown -= 1
+
+        # --- IDLE 计时逻辑 ---
         if self.status == "IDLE":
             # 如果不在补给站(5)上，才需要计时
             if grid_map.get_state(self.x, self.y) != 5:
@@ -116,6 +117,7 @@ class Robot(BaseAgent):
                 self.idle_counter = 0 # 已在补给站，不计时
         else:
             self.idle_counter = 0 # 工作中，重置计时
+
         # --- 1. 优先检查生存条件 (自动触发返航) ---
         # 只有在不是已经在回家的时候才检查
         if self.status != "RETURNING":
@@ -132,6 +134,17 @@ class Robot(BaseAgent):
         # --- 2. 状态机执行 ---
         
         if self.status in ["MOVING", "RETURNING"]:
+            if self.status == "MOVING" and self.target:
+                tx, ty = self.target
+                target_state = grid_map.get_state(tx, ty)
+                # 如果目标既不是火(2)，也不是我们要去的那个坐标(防止误判)
+                if target_state != 2:
+                    print(f"Robot {self.id}: Target fire at {self.target} is gone! Aborting.")
+                    self.status = "IDLE"
+                    self.target = None
+                    self.current_path = []
+                    return # 本帧直接结束
+
             if len(self.current_path) > 0:
                 next_pos = self.current_path[0]
                 
@@ -142,19 +155,17 @@ class Robot(BaseAgent):
                 is_blocked = (state == 3) or (state == 2 and next_pos != self.target)
                 
                 if is_blocked:
-                    print(f"Robot {self.id}: Path blocked! Re-planning...")
-                    # --- 动态重规划 (Re-planning) ---
-                    # 尝试重新计算从当前位置到目标的路径
-                    new_path = astar(grid_map, (self.x, self.y), self.target)
-                    if new_path:
-                        self.current_path = new_path[1:]
-                        # 如果新路径的第一步还是堵的(极端情况)，这帧先不动
-                        if not self.current_path: return 
+                    if self.replan_cooldown == 0:
+                        print(f"Robot {self.id}: Path blocked! Re-planning...")
+                        # 【修复1】这里修正了 astar 的调用，传入了 grid_map, start, end
+                        new_path = astar(grid_map, (self.x, self.y), self.target)
+                        if new_path:
+                            self.current_path = new_path[1:]
+                        else:
+                            self.status = "IDLE" # 彻底放弃，防止卡死
+                        self.replan_cooldown = 10 # 冷却 10 帧后再试
                     else:
-                        print(f"Robot {self.id}: Re-planning failed. Abort task.")
-                        self.status = "IDLE"
-                        self.target = None
-                        self.current_path = []
+                        # 冷却中，本帧原地等待
                         return
 
                 # B. 执行移动
@@ -164,7 +175,7 @@ class Robot(BaseAgent):
                     self.battery -= 1 # 移动消耗电量
             
             else:
-                # C. 到达目的地
+                # C. 路径走完了
                 # 情况1: 到达补给站
                 if grid_map.get_state(self.x, self.y) == 5:
                     print(f"Robot {self.id}: Refilled at Depot.")
@@ -173,9 +184,16 @@ class Robot(BaseAgent):
                     self.status = "IDLE"
                     self.target = None
                 
-                # 情况2: 到达火点 (准备灭火)
+                # 情况2: 准备灭火
                 elif self.status == "MOVING": 
-                    self.status = "EXTINGUISHING"
+                    # 【修复2】双重检查：防止“隔空灭火”BUG
+                    # 必须确认当前坐标真的等于目标坐标
+                    if self.target and (self.x, self.y) == self.target:
+                        self.status = "EXTINGUISHING"
+                    else:
+                        print(f"Robot {self.id}: Path ended but not at target! Aborting.")
+                        self.status = "IDLE"
+                        self.target = None
                 
                 # 其他情况
                 else:
@@ -184,20 +202,28 @@ class Robot(BaseAgent):
         elif self.status == "EXTINGUISHING":
             if self.target:
                 tx, ty = self.target
-                # 检查是否还有水
                 if self.water > 0:
+                    # 检查目标点还是不是火
                     if grid_map.get_state(tx, ty) == 2:
-                        grid_map.set_state(tx, ty, 4) # 灭火 -> 焦土
-                        self.water -= 1 # 消耗水
-                        print(f"Robot {self.id} extinguished fire. Water left: {self.water}")
-                    else:
-                        # 火已经没了
-                        pass
+                        grid_map.set_state(tx, ty, 6) # 设为已扑灭
+                        self.water -= 1 
+                        print(f"Robot {self.id} extinguished fire at {tx}, {ty}")
+
+                        # ==========================================
+                        # 【修复3】 连续作战逻辑 (Chain Reaction)
+                        # ==========================================
+                        nearby_fire = self.find_immediate_fire(grid_map)
+                        if nearby_fire and self.water > 0:
+                            print(f"Robot {self.id}: Chain reaction! Moving to neighbor {nearby_fire}")
+                            # 直接更新目标，不用经过调度中心
+                            self.set_target(nearby_fire[0], nearby_fire[1], grid_map)
+                            return # 直接进入下一帧处理，不要把 status 设为 IDLE
+                        # ==========================================
+
                 else:
                     print(f"Robot {self.id}: Out of water!")
-                    # 下一帧会被上面的资源检查捕获并返航
                 
-                # 任务结束
+                # 如果没水了，或者周围没火了，才停机
                 self.status = "IDLE"
                 self.target = None
 
@@ -205,7 +231,13 @@ class Robot(BaseAgent):
         """绘制机器人及其显眼的状态条"""
         px = self.x * CELL_SIZE
         py = self.y * CELL_SIZE
-        
+        if self.target and self.status in ["MOVING", "EXTINGUISHING"]:
+            tx, ty = self.target
+            # 画一条从机器人中心到目标中心的线
+            start_pos = (px + CELL_SIZE//2, py + CELL_SIZE//2)
+            end_pos = (tx * CELL_SIZE + CELL_SIZE//2, ty * CELL_SIZE + CELL_SIZE//2)
+            # 使用对应的颜色 (例如机器人颜色)
+            pygame.draw.line(surface, self.color, start_pos, end_pos, width=2)
         # 1. 绘制本体
         rect = pygame.Rect(px + 2, py + 2, CELL_SIZE - 4, CELL_SIZE - 4)
         pygame.draw.rect(surface, self.color, rect)
@@ -238,3 +270,17 @@ class Robot(BaseAgent):
         wat_pct = max(0, self.water / ROBOT_MAX_WATER)
         wat_width = int(STATUS_BAR_WIDTH * wat_pct)
         pygame.draw.rect(surface, (0, 191, 255), pygame.Rect(px + 1, py + CELL_SIZE + 1, wat_width, STATUS_BAR_HEIGHT))
+
+    def calculate_bid(self, fire_pos):
+        """
+        计算执行某任务的代价值 (Cost Function)
+        Cost = 距离 + 电池惩罚 + 水量惩罚
+        """
+        fx, fy = fire_pos
+        dist = abs(self.x - fx) + abs(self.y - fy)
+        
+        # 电池惩罚因子：电量越少，去远处的意愿越低
+        # 如果电量是 100%，因子是 0；如果电量是 20%，因子很大
+        battery_factor = (1.0 - (self.battery / 200.0)) * 50 
+        
+        return dist + battery_factor

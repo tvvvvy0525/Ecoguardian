@@ -21,6 +21,7 @@ COLOR_TREE = (34, 139, 34)      # 树木: 森林绿
 COLOR_FIRE = (255, 69, 0)       # 火焰: 红橙色
 COLOR_BURNT = (50, 50, 50)      # 焦土: 深灰
 COLOR_WALL = (100, 100, 100)    # 障碍: 灰色
+COLOR_EXTINGUISHED = (100, 149, 237) # 熄灭的火: 蓝色
 
 # 智能体颜色
 COLOR_UAV = (0, 191, 255)       # 无人机: 深天蓝
@@ -28,7 +29,7 @@ COLOR_UGV = (255, 215, 0)       # 机器人: 金色
 COLOR_DEPOT = (138, 43, 226)    # 补给站: 紫色
 
 # --- 仿真参数 ---
-FIRE_SPREAD_PROB = 0.005         # 火势向四周蔓延的概率
+FIRE_SPREAD_PROB = 0.01         # 火势向四周蔓延的概率
 TREE_DENSITY = 0.7              # 初始森林覆盖率
 
 # --- 物理引擎参数 ---
@@ -42,9 +43,9 @@ ROBOT_LOW_BATTERY_THRESHOLD = 50 # 低电量阈值 (触发返航)
 ROBOT_LOW_WATER_THRESHOLD = 5    # 低水量阈值 (触发返航)
 ROBOT_IDLE_RETURN_THRESHOLD = 100 # 空闲自动回补给站阈值 (帧数)
 
-DRYNESS_INCREASE_RATE = 0.3     # 每帧增加的干燥度
+DRYNESS_INCREASE_RATE = 1.5     # 每帧增加的干燥度
 IGNITION_DRYNESS_THRESHOLD = 100 # 超过此干燥度可能自燃 (约30秒~60秒不降雨/不处理)
-SPONTANEOUS_FIRE_PROB = 0.00003   # 超过阈值后的每帧自燃概率
+SPONTANEOUS_FIRE_PROB = 0.0001   # 超过阈值后的每帧自燃概率
 
 STATUS_BAR_WIDTH = 18           # 状态条宽度 (略小于格子的20px)
 STATUS_BAR_HEIGHT = 3           # 状态条高度
