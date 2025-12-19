@@ -9,7 +9,7 @@ SIDEBAR_WIDTH = 200    # 右侧信息栏宽度
 # 窗口总尺寸
 WINDOW_WIDTH = GRID_WIDTH * CELL_SIZE + SIDEBAR_WIDTH
 WINDOW_HEIGHT = GRID_HEIGHT * CELL_SIZE
-FPS = 10               # 帧率 (仿真速度)
+FPS = 60           # 帧率 (仿真速度)
 
 # --- 颜色定义 (RGB) ---
 COLOR_BG = (30, 30, 30)         # 背景黑灰
@@ -34,7 +34,6 @@ TREE_DENSITY = 0.7              # 初始森林覆盖率
 
 # --- 物理引擎参数 ---
 TREE_MAX_FUEL = 100              # 树木燃料值 (持续燃烧帧数)
-# WIND_DIRECTION = (1, 0)         # 风向 (x, y), 例如 (1,0) 为向右吹
 WIND_STRENGTH = 1.5             # 风力影响因子 (建议 0.0 ~ 2.0)
 
 ROBOT_MAX_BATTERY = 200         # 最大电量 (移动消耗)
@@ -44,8 +43,13 @@ ROBOT_LOW_WATER_THRESHOLD = 5    # 低水量阈值 (触发返航)
 ROBOT_IDLE_RETURN_THRESHOLD = 100 # 空闲自动回补给站阈值 (帧数)
 
 DRYNESS_INCREASE_RATE = 1.5     # 每帧增加的干燥度
-IGNITION_DRYNESS_THRESHOLD = 100 # 超过此干燥度可能自燃 (约30秒~60秒不降雨/不处理)
+IGNITION_DRYNESS_THRESHOLD = 100 # 超过此干燥度可能自燃
 SPONTANEOUS_FIRE_PROB = 0.0001   # 超过阈值后的每帧自燃概率
 
-STATUS_BAR_WIDTH = 18           # 状态条宽度 (略小于格子的20px)
+STATUS_BAR_WIDTH = 18           # 状态条宽度
 STATUS_BAR_HEIGHT = 3           # 状态条高度
+
+# --- [新增] 机器学习预测参数 (修正版) ---
+ML_LEARNING_RATE = 0.1          # 学习率
+BID_REJECT_THRESHOLD = 800.0    # 拒绝接单的代价阈值 (软阈值)
+PREDICTION_PENALTY = 500.0      # [Modified] 从 1000 降为 500，降低恐惧影响
