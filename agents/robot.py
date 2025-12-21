@@ -1,227 +1,159 @@
-# agents/robot.py
+import pygame
 from agents.base_agent import BaseAgent
 from configs.settings import *
 from core.pathfinding import astar
-import math
-import pygame
-import random
+
 
 class Robot(BaseAgent):
     def __init__(self, agent_id, x, y):
         super().__init__(agent_id, x, y, COLOR_UGV)
-        self.type = "UGV"
-        self.target = None      
-        self.current_path = []  
-        self.status = "IDLE"    
-        
-        self.battery = ROBOT_MAX_BATTERY
-        self.water = ROBOT_MAX_WATER
-        self.idle_counter = 0
-        self.replan_cooldown = 0
-        
-        self.last_task_features = None 
+        self.status, self.target, self.current_path = "IDLE", None, []
+        self.battery, self.water = ROBOT_MAX_BATTERY, ROBOT_MAX_WATER
+        self.last_task_features = None
 
-    def find_nearest_depot(self, grid_map):
-        min_dist = float('inf')
-        candidates = []
-        for x in range(grid_map.width):
-            for y in range(grid_map.height):
-                if grid_map.get_state(x, y) == 5:
-                    dist = abs(self.x - x) + abs(self.y - y)
-                    if dist < min_dist:
-                        min_dist = dist
-                        candidates = [(x, y)]
-                    elif dist == min_dist:
-                        candidates.append((x, y))
-        if candidates:
-            return random.choice(candidates)
-        return None
-
-    def scan_local(self, grid_map):
-        local_fires = []
-        scan_range = 2
-        for dx in range(-scan_range, scan_range + 1):
-            for dy in range(-scan_range, scan_range + 1):
+    def aoe_extinguish(self, grid_map):
+        if self.water <= 0:
+            return False
+        ext = False
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
                 nx, ny = self.x + dx, self.y + dy
-                if 0 <= nx < grid_map.width and 0 <= ny < grid_map.height:
-                    if grid_map.get_state(nx, ny) == 2:
-                        local_fires.append((nx, ny))
-        return local_fires
-
-    def set_target(self, tx, ty, grid_map, features=None):
-        path = astar(grid_map, (self.x, self.y), (tx, ty))
-        if path:
-            self.target = (tx, ty)
-            if features:
-                self.last_task_features = features
-            self.current_path = path[1:]
-            if self.status == "IDLE":
-                self.status = "MOVING"
-            # print(f"Robot {self.id}: Path found to ({tx}, {ty}), len: {len(self.current_path)}")
-            return True 
-        else:
-            # print(f"Robot {self.id}: No path to ({tx}, {ty}) - Unreachable")
-            self.status = "IDLE"
-            self.target = None
-            return False 
-
-    def find_immediate_fire(self, grid_map):
-        scan_range = 3
-        best_fire = None
-        min_dist = float('inf')
-        for dx in range(-scan_range, scan_range + 1):
-            for dy in range(-scan_range, scan_range + 1):
-                nx, ny = self.x + dx, self.y + dy
-                if 0 <= nx < grid_map.width and 0 <= ny < grid_map.height:
-                    if grid_map.get_state(nx, ny) == 2:
-                        dist = abs(self.x - nx) + abs(self.y - ny)
-                        if dist > 0 and dist < min_dist:
-                            min_dist = dist
-                            best_fire = (nx, ny)
-        return best_fire
+                if grid_map.get_state(nx, ny) == 2:
+                    grid_map.set_state(nx, ny, 6)
+                    self.water -= 1
+                    ext = True
+                    if self.water <= 0:
+                        return True
+        return ext
 
     def step(self, grid_map, predictor=None):
-        if self.replan_cooldown > 0:
-            self.replan_cooldown -= 1
+        if self.battery <= 0:
+            self.status = "STRANDED"
+            return
 
-        if self.status == "IDLE":
-             if grid_map.get_state(self.x, self.y) != 5:
-                self.idle_counter += 1
-                if self.idle_counter > ROBOT_IDLE_RETURN_THRESHOLD:
-                    depot = self.find_nearest_depot(grid_map)
-                    if depot:
-                        self.status = "RETURNING"
-                        self.set_target(depot[0], depot[1], grid_map)
-                        self.idle_counter = 0
-             else:
-                self.idle_counter = 0
-        else:
-            self.idle_counter = 0
+        # [核心修复] 目标验证与惩罚逻辑
+        if self.status == "MOVING" and self.target:
+            target_state = grid_map.get_state(*self.target)
+            if target_state != 2:  # 目标点不再是火（可能被抢或自然烧尽）
+                if predictor and self.last_task_features:
+                    # 给予负反馈 (Label 0)，让机器人学会这次决策是失败的
+                    predictor.train(self.last_task_features, 0)
+                # 停止脚步，重置状态
+                self.status, self.target, self.current_path = "IDLE", None, []
+                return
 
-        if self.status != "RETURNING":
-            needs_refill = (self.battery < ROBOT_LOW_BATTERY_THRESHOLD) or (self.water < ROBOT_LOW_WATER_THRESHOLD)
-            if needs_refill:
-                depot = self.find_nearest_depot(grid_map)
-                if depot:
-                    self.status = "RETURNING"
-                    self.set_target(depot[0], depot[1], grid_map)
+        # 全时 AOE
+        if self.water > 0:
+            if (
+                self.aoe_extinguish(grid_map)
+                and self.status == "MOVING"
+                and predictor
+                and self.last_task_features
+            ):
+                predictor.train(self.last_task_features, 1)  # 成功灭火的正反馈
 
-        if self.status in ["MOVING", "RETURNING"]:
-            if self.status == "MOVING" and self.target:
-                tx, ty = self.target
-                target_state = grid_map.get_state(tx, ty)
-                
-                # [关键修复: 动态补救机制]
-                if target_state != 2:
-                    nearby = self.find_immediate_fire(grid_map)
-                    
-                    if nearby:
-                        # 找到了替补！原地改换目标
-                        self.target = nearby 
-                        self.current_path = [] 
-                        return 
-                    else:
-                        # [关键修复: 选择性归因]
-                        if target_state == 6:
-                            # 被抢了 -> 负反馈
-                            if self.last_task_features and predictor:
-                                predictor.train(self.last_task_features, 0) 
-                                self.last_task_features = None
-                        elif target_state == 4:
-                            # 自然烧完 -> 忽略
-                            self.last_task_features = None 
+        # 武装返航协议
+        if self.status not in ["RETURNING", "STRANDED"] and (
+            self.battery < ROBOT_LOW_BATTERY_THRESHOLD
+            or self.water <= ROBOT_WATER_RESERVE
+        ):
+            depot = min(
+                grid_map.depots, key=lambda d: abs(self.x - d[0]) + abs(self.y - d[1])
+            )
+            self.status, self.target = "RETURNING", None
+            self.set_target(depot[0], depot[1], grid_map)
 
-                        self.status = "IDLE"
-                        self.target = None
-                        self.current_path = []
-                        return 
+        # 移动逻辑
+        if self.status in ["MOVING", "RETURNING"] and self.current_path:
+            self.x, self.y = self.current_path.pop(0)
+            self.battery -= 1
+            if (self.x, self.y) == self.target:
+                if self.status == "RETURNING":
+                    self.battery, self.water = ROBOT_MAX_BATTERY, ROBOT_MAX_WATER
+                self.status, self.target = "IDLE", None
+        elif not self.current_path:
+            self.status = "IDLE"
 
-            if len(self.current_path) > 0:
-                next_pos = self.current_path[0]
-                state = grid_map.get_state(next_pos[0], next_pos[1])
-                is_blocked = (state == 3) or (state == 2 and next_pos != self.target)
-                
-                if is_blocked:
-                    if self.replan_cooldown == 0:
-                        new_path = astar(grid_map, (self.x, self.y), self.target)
-                        if new_path:
-                            self.current_path = new_path[1:]
-                        else:
-                            self.status = "IDLE"
-                        self.replan_cooldown = 10
-                    else:
-                        return
+    def set_target(self, tx, ty, grid_map, feats=None):
+        p = astar(grid_map, (self.x, self.y), (tx, ty), has_water=(self.water > 0))
+        if p:
+            self.target, self.current_path, self.last_task_features = (
+                (tx, ty),
+                p[1:],
+                feats,
+            )
+            if self.status != "RETURNING":
+                self.status = "MOVING"
+            return True
+        return False
 
-                if len(self.current_path) > 0:
-                    self.x, self.y = self.current_path.pop(0)
-                    self.battery -= 1
-            else:
-                if grid_map.get_state(self.x, self.y) == 5:
-                    self.battery = ROBOT_MAX_BATTERY
-                    self.water = ROBOT_MAX_WATER
-                    self.status = "IDLE"
-                    self.target = None
-                elif self.status == "MOVING": 
-                    if self.target and (self.x, self.y) == self.target:
-                        self.status = "EXTINGUISHING"
-                    else:
-                        self.status = "IDLE"
-                        self.target = None
-                else:
-                    self.status = "IDLE"
-
-        elif self.status == "EXTINGUISHING":
-            if self.target:
-                tx, ty = self.target
-                if self.water > 0:
-                    if grid_map.get_state(tx, ty) == 2:
-                        grid_map.set_state(tx, ty, 6)
-                        self.water -= 1 
-                        
-                        # 成功反馈 (Label 1)
-                        if self.last_task_features and predictor:
-                            predictor.train(self.last_task_features, 1) 
-                            self.last_task_features = None
-                            
-                        nearby_fire = self.find_immediate_fire(grid_map)
-                        if nearby_fire and self.water > 0:
-                            self.set_target(nearby_fire[0], nearby_fire[1], grid_map)
-                            return
-                self.status = "IDLE"
-                self.target = None
+    def calculate_bid(self, fire_pos, feats, predictor):
+        dist = abs(self.x - fire_pos[0]) + abs(self.y - fire_pos[1])
+        risk = (1.0 - predictor.predict_prob(feats)) * PREDICTION_PENALTY
+        return dist + risk + (1.0 - self.battery / ROBOT_MAX_BATTERY) * 50
 
     def draw(self, surface):
-        px = self.x * CELL_SIZE
-        py = self.y * CELL_SIZE
-        if self.target and self.status in ["MOVING", "EXTINGUISHING"]:
-            tx, ty = self.target
-            start_pos = (px + CELL_SIZE//2, py + CELL_SIZE//2)
-            end_pos = (tx * CELL_SIZE + CELL_SIZE//2, ty * CELL_SIZE + CELL_SIZE//2)
-            pygame.draw.line(surface, self.color, start_pos, end_pos, width=2)
-        rect = pygame.Rect(px + 2, py + 2, CELL_SIZE - 4, CELL_SIZE - 4)
-        pygame.draw.rect(surface, self.color, rect)
-        if self.status == "EXTINGUISHING":
-            pygame.draw.rect(surface, (255, 140, 0), pygame.Rect(px, py, CELL_SIZE, CELL_SIZE), width=3)
-        
-        # 状态条绘制
-        bar_bg_rect = pygame.Rect(px + 1, py - 4, STATUS_BAR_WIDTH, STATUS_BAR_HEIGHT)
-        pygame.draw.rect(surface, (50, 0, 0), bar_bg_rect)
-        bat_pct = max(0, self.battery / ROBOT_MAX_BATTERY)
-        bat_width = int(STATUS_BAR_WIDTH * bat_pct)
-        bat_color = (0, 255, 0) if bat_pct > 0.5 else ((255, 255, 0) if bat_pct > 0.2 else (255, 0, 0))
-        pygame.draw.rect(surface, bat_color, pygame.Rect(px + 1, py - 4, bat_width, STATUS_BAR_HEIGHT))
+        px, py = self.x * CELL_SIZE, self.y * CELL_SIZE
+        if self.current_path and self.target:
+            pts = [(self.x * CELL_SIZE + 10, self.y * CELL_SIZE + 10)] + [
+                (p[0] * CELL_SIZE + 10, p[1] * CELL_SIZE + 10)
+                for p in self.current_path
+            ]
+            if len(pts) > 1:
+                pygame.draw.lines(surface, self.color, False, pts, 1)
+        rect_color = self.color if self.status != "STRANDED" else (100, 100, 100)
+        pygame.draw.rect(
+            surface, rect_color, (px + 2, py + 2, CELL_SIZE - 4, CELL_SIZE - 4)
+        )
+        pygame.draw.rect(
+            surface,
+            (0, 255, 0),
+            (px + 1, py - 3, int(18 * self.battery / ROBOT_MAX_BATTERY), 2),
+        )
+        pygame.draw.rect(
+            surface,
+            (0, 191, 255),
+            (px + 1, py + CELL_SIZE + 1, int(18 * self.water / ROBOT_MAX_WATER), 2),
+        )
 
-        water_bg_rect = pygame.Rect(px + 1, py + CELL_SIZE + 1, STATUS_BAR_WIDTH, STATUS_BAR_HEIGHT)
-        pygame.draw.rect(surface, (0, 0, 50), water_bg_rect)
-        wat_pct = max(0, self.water / ROBOT_MAX_WATER)
-        wat_width = int(STATUS_BAR_WIDTH * wat_pct)
-        pygame.draw.rect(surface, (0, 191, 255), pygame.Rect(px + 1, py + CELL_SIZE + 1, wat_width, STATUS_BAR_HEIGHT))
 
-    def calculate_bid(self, fire_pos, features, predictor):
-        fx, fy = fire_pos
-        dist = abs(self.x - fx) + abs(self.y - fy)
-        battery_factor = (1.0 - (self.battery / 200.0)) * 50 
-        base_cost = dist + battery_factor
-        prob_success = predictor.predict_prob(features[0], features[1])
-        risk_cost = (1.0 - prob_success) * PREDICTION_PENALTY
-        return base_cost + risk_cost
+class SupportBot(BaseAgent):
+    def __init__(self, agent_id, x, y):
+        super().__init__(agent_id, x, y, COLOR_SUPPORT)
+        self.target_robot = None
+        self.path = []
+
+    def step(self, grid_map, all_robots):
+        if not self.target_robot:
+            stranded = [r for r in all_robots if r.status == "STRANDED"]
+            if stranded:
+                self.target_robot = min(
+                    stranded, key=lambda r: abs(self.x - r.x) + abs(self.y - r.y)
+                )
+                self.path = (
+                    astar(
+                        grid_map,
+                        (self.x, self.y),
+                        (self.target_robot.x, self.target_robot.y),
+                        True,
+                    )
+                    or []
+                )
+
+        if self.path:
+            self.x, self.y = self.path.pop(0)
+            # 救援者自带 AOE 保护
+            for dx in [-1, 0, 1]:
+                for dy in [-1, 0, 1]:
+                    if grid_map.get_state(self.x + dx, self.y + dy) == 2:
+                        grid_map.set_state(self.x + dx, self.y + dy, 6)
+
+            if (
+                abs(self.x - self.target_robot.x) <= 1
+                and abs(self.y - self.target_robot.y) <= 1
+            ):
+                self.target_robot.battery = ROBOT_MAX_BATTERY
+                self.target_robot.water = ROBOT_MAX_WATER
+                self.target_robot.status = "IDLE"
+                self.target_robot = None
+                self.path = []

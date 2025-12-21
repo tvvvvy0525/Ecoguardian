@@ -1,292 +1,157 @@
-import pygame
-import sys
-import numpy as np
-import math
+import pygame, sys, numpy as np
 from configs.settings import *
 from core.grid_map import GridMap
+from agents.robot import Robot, SupportBot
 from agents.drone import Drone
-from agents.robot import Robot
 from core.predictor import EfficiencyPredictor
+from core.genetic_optimizer import GeneticOptimizer
 
-# 初始化 Pygame
-pygame.init()
-screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
-pygame.display.set_caption("EcoGuardian - Intelligent Utility Evaluator")
-clock = pygame.time.Clock()
 
-COLOR_MAP = {
-    0: COLOR_EMPTY,
-    1: COLOR_TREE,
-    2: COLOR_FIRE,
-    3: COLOR_WALL,
-    4: COLOR_BURNT,
-    5: COLOR_DEPOT,
-    6: COLOR_EXTINGUISHED
-}
+def get_local_obs_density(grid_map, x, y):
+    x1, x2 = max(0, x - 1), min(grid_map.width, x + 2)
+    y1, y2 = max(0, y - 1), min(grid_map.height, y + 2)
+    area = grid_map.grid[x1:x2, y1:y2]
+    return np.sum(area == 3) / area.size
 
-def draw_grid(surface, grid_map):
-    for x in range(grid_map.width):
-        for y in range(grid_map.height):
-            state = grid_map.grid[x][y]
-            color = COLOR_MAP.get(state, COLOR_EMPTY)
-            rect = pygame.Rect(x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE)
-            pygame.draw.rect(surface, color, rect)
 
-def draw_sidebar(surface, grid_map, robots, logs, predictor):
-    sidebar_rect = pygame.Rect(GRID_WIDTH * CELL_SIZE, 0, SIDEBAR_WIDTH, WINDOW_HEIGHT)
-    pygame.draw.rect(surface, (40, 40, 40), sidebar_rect)
-    font = pygame.font.SysFont("Arial", 16)
-    
-    # 统计
-    trees = np.sum(grid_map.grid == 1)
-    fires = np.sum(grid_map.grid == 2)
-    saved_by_bot = np.sum(grid_map.grid == 6)
-    
-    # 显示权重
-    w_diff = predictor.weights[0]
-    w_size = predictor.weights[1]
-    w_bias = predictor.weights[2]
-    
-    texts = [
-        f"EcoGuardian ML",
-        f"----------------",
-        f"Samples: {predictor.training_count}",
-        f"W_Diff: {w_diff:.3f}",
-        f"W_Size: {w_size:.3f}",
-        f"Bias: {w_bias:.3f}",
-        f"----------------",
-        f"Trees: {trees}",
-        f"Fires: {fires} (!)",
-        f"Extinguished: {saved_by_bot}", 
-        f"----------------",
-        f"Robots Total: {len(robots)}",
-        f"----------------",
-        f"KEYS:",
-        f"[SPACE]: Ignite",
-        f"[R]: Reset"
-    ]
-    
-    current_y = 20
-    line_height = 25
+def draw_sidebar(surface, env, predictor, ga, logs, discovered_count):
+    pygame.draw.rect(
+        surface, (40, 40, 40), (GRID_WIDTH * CELL_SIZE, 0, SIDEBAR_WIDTH, WINDOW_HEIGHT)
+    )
+    font = pygame.font.SysFont("Arial", 14)
+    info = [
+        f"--- ECO GUARDIAN 2.0 ---",
+        f"Gen: {ga.generation} | Frame: {ga.current_idx}",
+        f"Extinguished: {np.sum(env.grid==6)}",
+        f"Discovered Fires: {discovered_count}",  # 无人机发现的数量
+        f"Penalty: {PREDICTION_PENALTY:.1f}",
+        f"------------------------",
+        f"ML Weights (5D):",
+        f"W_Dist: {predictor.weights[0]:.3f}",
+        f"W_Size: {predictor.weights[1]:.3f}",
+        f"W_Bat: {predictor.weights[2]:.3f}",
+        f"W_Wat: {predictor.weights[3]:.3f}",
+        f"W_Obs: {predictor.weights[4]:.3f}",
+        f"------------------------",
+        f"LOGS:",
+    ] + logs[-6:]
+    for i, text in enumerate(info):
+        surface.blit(
+            font.render(text, True, (200, 200, 200)),
+            (GRID_WIDTH * CELL_SIZE + 10, 20 + i * 22),
+        )
 
-    for text in texts:
-        color = (200, 200, 200)
-        if "W_Diff" in text: color = (100, 255, 100) 
-        if "W_Size" in text: color = (100, 200, 255)
-        text_surface = font.render(text, True, color)
-        surface.blit(text_surface, (GRID_WIDTH * CELL_SIZE + 10, current_y))
-        current_y += line_height
-
-    start_y = current_y + 20 
-    title_surf = pygame.font.SysFont("Arial", 16).render("--- Mission Log ---", True, (200, 200, 200))
-    surface.blit(title_surf, (GRID_WIDTH * CELL_SIZE + 10, start_y))
-    
-    font_small = pygame.font.SysFont("Arial", 14)
-    log_start_y = start_y + 25 
-    
-    for i, msg in enumerate(logs):
-        msg_surf = font_small.render(msg, True, (255, 215, 0)) 
-        surface.blit(msg_surf, (GRID_WIDTH * CELL_SIZE + 10, log_start_y + i * 20))
-
-def get_fire_cluster_size(grid_map, fx, fy):
-    """简单计算火团大小 (BFS)"""
-    count = 0
-    for dx in range(-2, 3):
-        for dy in range(-2, 3):
-            nx, ny = fx+dx, fy+dy
-            if grid_map.get_state(nx, ny) == 2:
-                count += 1
-    return count
 
 def main():
-    cmd_logs = []
-    env_map = GridMap()
-    env_map.ignite_random() 
+    pygame.init()
+    screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
+    clock = pygame.time.Clock()
+    env = GridMap()
 
-    # --- 初始化智能体 ---
-    drones = [Drone(0, 0, 0), Drone(1, GRID_WIDTH-1, GRID_HEIGHT-1)]
-    robots = [
-        Robot(101, 2, GRID_HEIGHT-2),
-        Robot(102, 5, GRID_HEIGHT-2),
-        Robot(103, GRID_WIDTH-2, GRID_HEIGHT-2)
-    ]
-    
-    # 初始化预测器
-    predictor = EfficiencyPredictor(learning_rate=ML_LEARNING_RATE)
-    
-    detected_fires = set()
-    unreachable_tasks = {}
-    
-    frame_count = 0 
+    # 初始火点
+    for _ in range(3):
+        env.ignite_random()
 
-    running = True
-    while running:
-        frame_count += 1 
-        
-        # --- 事件处理 ---
+    # [核心] 共享感知注册表：不再使用上帝视角
+    discovered_fires = set()
+
+    predictor = EfficiencyPredictor(ML_LEARNING_RATE)
+    ga = GeneticOptimizer(pop_size=4)
+    robots = [Robot(i, env.depots[i % 4][0], env.depots[i % 4][1]) for i in range(3)]
+    supporter = SupportBot(99, env.depots[0][0], env.depots[0][1])
+    drones = [Drone(201, 10, 10), Drone(202, 30, 20)]  # 无人机集群
+
+    frame, logs = 0, []
+
+    while True:
+        frame += 1
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
-                running = False
-            elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_r:
-                    env_map = GridMap()
-                    detected_fires.clear()
-                    unreachable_tasks.clear() 
-                    robots[0].x, robots[0].y = 2, GRID_HEIGHT-2
-                    robots[1].x, robots[1].y = 5, GRID_HEIGHT-2
-                    robots[2].x, robots[2].y = GRID_WIDTH-2, GRID_HEIGHT-2
-                    for r in robots:
-                        r.status = "IDLE"
-                        r.target = None
-                        r.battery = ROBOT_MAX_BATTERY
-                        r.water = ROBOT_MAX_WATER
-                    predictor.weights = np.array([0.0, 0.0, 0.0])
-                elif event.key == pygame.K_SPACE:
-                    env_map.ignite_random()
+                pygame.quit()
+                sys.exit()
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE:
+                env.ignite_random()
 
-        # --- 智能体逻辑更新 ---
-        if frame_count % 5 == 0 and env_map:
-            env_map.update_fire_spread()
-            
-        current_frame_fires = set()
+        if frame % 12 == 0:
+            env.update_fire_spread()
+
+        # 1. 无人机巡逻与上报（交互核心）
         for drone in drones:
-            drone.step(env_map, frame_count) 
-            found = drone.scan(env_map, frame_count)
-            current_frame_fires.update(found)
-        for robot in robots:
-            local_found = robot.scan_local(env_map)
-            current_frame_fires.update(local_found)
-        detected_fires.update(current_frame_fires)
-        detected_fires = {f for f in detected_fires if env_map.get_state(f[0], f[1]) == 2}
-        
-        # --- 核心调度 (修复互斥锁) ---
-        if frame_count % 10 == 0:
-            
-            # 清理黑名单
-            expired = [k for k, v in unreachable_tasks.items() if v < frame_count]
-            for k in expired:
-                del unreachable_tasks[k]
-            
-            # 1. 获取已经在干活的机器人的目标
-            busy_robots = [r for r in robots if r.target]
-            
-            # [新增] 本帧内新分配的目标 (Frame Mutex Lock)
-            # 用于防止 Robot A 选了火点 X 后，Robot B 在同一帧内也选 X
-            frame_locked_fires = set()
+            drone.step(env, frame)
+            new_reports = drone.scan(env, frame)
+            for f_pos in new_reports:
+                discovered_fires.add((int(f_pos[0]), int(f_pos[1])))
 
-            for robot in robots:
-                if robot.status == "IDLE" and detected_fires:
-                    if robot.battery < ROBOT_LOW_BATTERY_THRESHOLD or robot.water <= 0:
-                        continue 
-                    
-                    all_candidates = [] 
-                    
-                    for fire_pos in detected_fires:
-                        # 检查1: 是否被老员工锁定 (Previous Frame)
-                        is_locked_prev = False
-                        for r in busy_robots:
-                            if r.target == fire_pos:
-                                is_locked_prev = True
-                                break
-                        if is_locked_prev: continue
-                        
-                        # [新增] 检查2: 是否被新员工锁定 (Current Frame)
-                        if fire_pos in frame_locked_fires:
-                            continue
-                        
-                        if (robot.id, fire_pos) in unreachable_tasks:
-                            continue
+        # 2. 清理感知池（移除已熄灭的火点）
+        discovered_fires = {
+            f for f in discovered_fires if env.get_state(f[0], f[1]) == 2
+        }
 
-                        # --- ML 特征提取 ---
-                        my_dist = abs(robot.x - fire_pos[0]) + abs(robot.y - fire_pos[1])
-                        
-                        closest_ally_dist = 999
-                        for ally in robots:
-                            if ally.id == robot.id: continue
-                            d = abs(ally.x - fire_pos[0]) + abs(ally.y - fire_pos[1])
-                            
-                            # 判定谁是竞争者：
-                            # 1. 已经有目标的队友
-                            if ally.target:
-                                t_dist = abs(ally.target[0] - fire_pos[0]) + abs(ally.target[1] - fire_pos[1])
-                                if t_dist < 5:
-                                    if d < closest_ally_dist: closest_ally_dist = d
-                            # 2. [新增] 本帧刚接了单的队友
-                            # 我们的 frame_locked_fires 只是火点集合，如果要更精确，可以记录 (bot, fire)
-                            # 这里简化处理：如果队友在附近且火点被锁了，那就算竞争
-                            # 但实际上我们在上面已经 continue 掉了 locked fires，所以这里不用太担心
-                            pass
+        # 3. 任务调度（仅基于无人机发现的信息）
+        if frame % 20 == 0:
+            for r in [rob for rob in robots if rob.status == "IDLE"]:
+                if not discovered_fires:
+                    break
+                best_f, min_c, best_feat = None, 2000, None
 
-                        
-                        if closest_ally_dist == 999: closest_ally_dist = 50 
-                        
-                        diff_dist = my_dist - closest_ally_dist
-                        fire_size = get_fire_cluster_size(env_map, fire_pos[0], fire_pos[1])
-                        
-                        current_features = (diff_dist, fire_size)
-                        cost = robot.calculate_bid(fire_pos, current_features, predictor)
-                        
-                        all_candidates.append((cost, fire_pos, current_features))
-                    
-                    if not all_candidates:
+                for f_pos in discovered_fires:
+                    fx, fy = f_pos
+                    if any(other.target == (fx, fy) for other in robots):
                         continue
-                        
-                    # 优选 -> 兜底
-                    good_candidates = [c for c in all_candidates if c[0] <= BID_REJECT_THRESHOLD]
-                    good_candidates.sort(key=lambda x: x[0])
-                    
-                    final_candidates = []
-                    is_panic = False
-                    
-                    if good_candidates:
-                        final_candidates = good_candidates
-                    else:
-                        all_candidates.sort(key=lambda x: x[0])
-                        final_candidates = all_candidates
-                        is_panic = True
-                    
-                    task_assigned = False
-                    for cost, fire_pos, features in final_candidates:
-                        # 最后再检查一遍锁 (虽然上面查过了，但为了保险)
-                        if fire_pos in frame_locked_fires:
-                            continue
 
-                        success = robot.set_target(fire_pos[0], fire_pos[1], env_map, features=features)
-                        
-                        if success:
-                            if not is_panic:
-                                log_msg = f"> Assign: Bot {robot.id} -> ({fire_pos[0]},{fire_pos[1]})"
-                                cmd_logs.append(log_msg)
-                            
-                            task_assigned = True
-                            # [关键] 立即加锁！
-                            frame_locked_fires.add(fire_pos)
-                            break 
-                        else:
-                            unreachable_tasks[(robot.id, fire_pos)] = frame_count + 50
-                            
-                    if len(cmd_logs) > 8: 
-                        cmd_logs.pop(0)
+                    feats = [
+                        abs(r.x - fx) - 10,
+                        np.sum(env.grid[fx - 1 : fx + 2, fy - 1 : fy + 2] == 2),
+                        r.battery / ROBOT_MAX_BATTERY,
+                        r.water / ROBOT_MAX_WATER,
+                        get_local_obs_density(env, fx, fy),
+                    ]
+                    cost = r.calculate_bid((fx, fy), feats, predictor)
+                    if cost < min_c:
+                        min_c, best_f, best_feat = cost, (fx, fy), feats
 
-        # --- 行动 ---
-        for robot in robots:
-            robot.step(env_map, predictor)
+                if best_f and min_c < BID_REJECT_THRESHOLD:
+                    if r.set_target(best_f[0], best_f[1], env, best_feat):
+                        logs.append(f"Coord: Bot {r.id} -> Fire {best_f}")
 
-        # --- 渲染 ---
+        # 4. 执行更新
+        for r in robots:
+            r.step(env, predictor)
+        supporter.step(env, robots)
+
+        # 进化与渲染
+        if frame % GA_EVOLVE_INTERVAL == 0:
+            ga.get_current_genome().extinguished_count = np.sum(env.grid == 6)
+            ga.next_step()
+            global PREDICTION_PENALTY
+            PREDICTION_PENALTY = ga.get_current_genome().penalty
+
         screen.fill(COLOR_BG)
-        draw_grid(screen, env_map)
-        for drone in drones:
-            drone.draw(screen)
-        for robot in robots:
-            robot.draw(screen)
-        
-        draw_sidebar(screen, env_map, robots, cmd_logs, predictor)
+        for x in range(env.width):
+            for y in range(env.height):
+                color = {
+                    0: COLOR_EMPTY,
+                    1: COLOR_TREE,
+                    2: COLOR_FIRE,
+                    3: COLOR_WALL,
+                    4: COLOR_BURNT,
+                    5: COLOR_DEPOT,
+                    6: COLOR_EXTINGUISHED,
+                }.get(env.grid[x, y])
+                pygame.draw.rect(
+                    screen, color, (x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE)
+                )
+
+        for r in robots:
+            r.draw(screen)
+        for d in drones:
+            d.draw(screen)  # [修复] 渲染无人机
+        supporter.draw(screen)
+        draw_sidebar(screen, env, predictor, ga, logs, len(discovered_fires))
 
         pygame.display.flip()
         clock.tick(FPS)
 
-    pygame.quit()
-    sys.exit()
 
 if __name__ == "__main__":
     main()
