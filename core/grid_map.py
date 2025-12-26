@@ -20,7 +20,7 @@ class GridMap:
         self.height = height
         self.grid = np.zeros((width, height), dtype=int)
         self.fuel_grid = np.zeros((width, height), dtype=int)
-        self.last_scan_frame = np.zeros((width, height), dtype=int)
+        self.last_scan_frame = np.zeros((width, height), dtype=int) # 记录无人机扫描半径内的紧迫度
         self.dryness_grid = np.zeros((width, height), dtype=float)
         self.wind_name, self.wind_direction = random.choice(self.WIND_DATA)
         self.depots = []  # [新增] 补给站索引
@@ -57,11 +57,12 @@ class GridMap:
 
     # [清单3] 向量化更新
     def update_dryness(self):
-        tree_mask = self.grid == 1
-        noise = np.random.uniform(0.5, 1.5, size=(self.width, self.height))
-        self.dryness_grid[tree_mask] += DRYNESS_INCREASE_RATE * noise[tree_mask]
+        tree_mask = self.grid == 1 # 树木掩码
+        noise = np.random.uniform(0.5, 1.5, size=(self.width, self.height)) # 随机噪声
+        self.dryness_grid[tree_mask] += DRYNESS_INCREASE_RATE * noise[tree_mask] # 增加干燥度
 
-        ignite_mask = tree_mask & (self.dryness_grid > IGNITION_DRYNESS_THRESHOLD)
+        ignite_mask = tree_mask & (self.dryness_grid > IGNITION_DRYNESS_THRESHOLD) # 点燃掩码
+        # 遍历点燃掩码内的区域，如果区域内的干燥度大于点燃干燥度阈值，且随机数小于点燃概率，则点燃树木
         for x, y in np.argwhere(
             ignite_mask
             & (np.random.random((self.width, self.height)) < SPONTANEOUS_FIRE_PROB)
@@ -72,13 +73,13 @@ class GridMap:
 
     # [清单3] 向量化核心
     def update_fire_spread(self):
-        self.update_dryness()
+        self.update_dryness() # 更新干燥度
         new_grid = self.grid.copy()
         fire_mask = self.grid == 2
-        self.fuel_grid[fire_mask] -= 1
-        new_grid[fire_mask & (self.fuel_grid <= 0)] = 4
+        self.fuel_grid[fire_mask] -= 1 # 已点燃树木燃料减少1
+        new_grid[fire_mask & (self.fuel_grid <= 0)] = 4 # 已点燃树木燃料减少到0，则标记为已熄灭
 
-        fire_indices = np.argwhere(self.grid == 2)
+        fire_indices = np.argwhere(self.grid == 2) # 已点燃树木索引
         for fx, fy in fire_indices:
             for dx in [-1, 0, 1]:
                 for dy in [-1, 0, 1]:
@@ -90,6 +91,7 @@ class GridMap:
                         and 0 <= ny < self.height
                         and self.grid[nx][ny] == 1
                     ):
+                        # 计算风向与火焰传播方向的点积
                         dot_prod = (
                             dx * self.wind_direction[0] + dy * self.wind_direction[1]
                         )
@@ -113,9 +115,10 @@ class GridMap:
         return None
 
     def get_state(self, x, y):
+        """获取网格单元格状态"""
         if 0 <= x < self.width and 0 <= y < self.height:
-            return self.grid[x][y]
-        return 3
+            return self.grid[x][y] # 返回网格单元格状态
+        return 3 # 返回障碍物状态
 
     def set_state(self, x, y, state):
         if 0 <= x < self.width and 0 <= y < self.height:
@@ -124,11 +127,13 @@ class GridMap:
                 self.dryness_grid[x][y] = random.uniform(0, 5)
 
     def mark_scanned(self, cx, cy, radius, frame_id):
+        """标记最后一次扫描该区域的时间"""
         x_min, x_max = max(0, cx - radius), min(self.width, cx + radius + 1)
         y_min, y_max = max(0, cy - radius), min(self.height, cy + radius + 1)
         self.last_scan_frame[x_min:x_max, y_min:y_max] = frame_id
-
+    
     def get_average_urgency(self, cx, cy, radius, frame_id):
-        x_min, x_max = max(0, cx - radius), min(self.width, cx + radius + 1)
-        y_min, y_max = max(0, cy - radius), min(self.height, cy + radius + 1)
-        return np.mean(frame_id - self.last_scan_frame[x_min:x_max, y_min:y_max])
+        """获取无人机扫描半径内的平均紧迫度"""
+        x_min, x_max = max(0, cx - radius), min(self.width, cx + radius + 1) # 计算x坐标范围，具有防越界处理
+        y_min, y_max = max(0, cy - radius), min(self.height, cy + radius + 1) # 计算y坐标范围
+        return np.mean(frame_id - self.last_scan_frame[x_min:x_max, y_min:y_max]) # 计算平均紧迫度=该区域（当前帧数-上次扫描帧数）的平均值
