@@ -6,11 +6,6 @@ class EfficiencyPredictor:
     def __init__(self, learning_rate=0.1):
         self.lr = learning_rate
         self.base_lr = learning_rate
-
-        # [核心修复] 不要用 np.zeros 初始化
-        # 我们要给机器人植入“常识” (Heuristic Initialization)
-        # 权重对应顺序: [距离接近度, 火势严重度, 电量, 水量, 障碍密度, Bias]
-
         self.weights = np.array([
             0.5,   # W_Prox (+): 离得越近越好 (特征是 1-dist，所以要正权重)
             0.5,   # W_Sev  (+): 火大比较值得去 (收益高)
@@ -23,7 +18,6 @@ class EfficiencyPredictor:
 
         self.training_count = 0
 
-    # ... 下面的 sigmoid, predict_prob, train 方法保持不变 ...
     def sigmoid(self, x):
         return 1 / (1 + np.exp(-np.clip(x, -20, 20)))
 
